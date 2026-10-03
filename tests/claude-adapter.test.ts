@@ -137,6 +137,28 @@ describe('ClaudeAdapter', () => {
     expect(text).toBe('本文です。\nここにコードがあります。\n続きです。');
   });
 
+  it('finds each question and reads only its text, not the attachments or the action row', () => {
+    const chat = new FakeClaude();
+    chat.addUser('<p>一つ目の質問です。</p>');
+    chat.addAssistant('t1-hub-reply').innerHTML = '<p>回答です。</p>';
+    chat.addUser('<p>二つ目の質問です。</p><p>https://example.com/very/long を見て。</p>');
+    const second = document.querySelectorAll<HTMLElement>('[data-cds="UserMessage"]')[1];
+    second.insertAdjacentHTML('afterbegin', '<div data-cds="MessageAttachments"><img alt="添付画像"></div>');
+    second.insertAdjacentHTML(
+      'beforeend',
+      '<div data-cds="MessageActions"><span data-cds="RelativeTime">55分前</span><button type="button">コピー</button></div>',
+    );
+
+    const adapter = new ClaudeAdapter();
+    const turns = adapter.userTurns();
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toBe(second);
+    expect(extractSpeechText(adapter.contentOfUserTurn(turns[0]), DEFAULT_SANITIZE_OPTIONS)).toBe('一つ目の質問です。');
+    expect(extractSpeechText(adapter.contentOfUserTurn(turns[1]), DEFAULT_SANITIZE_OPTIONS)).toBe(
+      '二つ目の質問です。\nリンクがあります。 を見て。',
+    );
+  });
+
   it('does not read the action bar when the answer has no body yet', () => {
     const chat = new FakeClaude();
     chat.addUser('質問');

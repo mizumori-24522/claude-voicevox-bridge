@@ -7,8 +7,10 @@ import { log, warn } from './logger';
  * ■ 2026-10-03 に実機で確認した構造
  *   <div role="feed">
  *     <div data-testid="transcript-row" data-perf-row="human|assistant">   ← 仮想化される行
- *       <div data-cds="UserMessage" data-turn-key="<ターン>">
- *         <div data-testid="user-message">                                 ← 質問の本文
+ *       <div data-cds="UserMessage" data-turn-key="<ターン>">              ← 質問の枠（幅いっぱい・右寄せ）
+ *         <div data-cds="MessageAttachments">                              ← 添付（あれば）
+ *         <div>…<div data-testid="user-message">                           ← 吹き出しと質問の本文
+ *         <div data-cds="MessageActions">                                  ← 時刻・編集・コピー
  *       <div data-testid="assistant-message" data-cds="AssistantMessage"
  *            data-turn-key="<ターン>-hub-reply" data-is-streaming="true|false">
  *         <h2 class="sr-only">Claudeが返答しました: …</h2>
@@ -37,6 +39,7 @@ export type AssistantMessage = {
 
 const ASSISTANT_SEL = '[data-testid="assistant-message"]';
 const USER_SEL = '[data-testid="user-message"]';
+const USER_TURN_SEL = '[data-cds="UserMessage"]';
 const ENGINE_ROOT_SEL = '[data-transcript-engine-root]';
 const CONTENT_SELECTORS = ['[data-cds="Prose"]', '[data-perf-reply-text]', '.standard-markdown'];
 const COMPOSER_SELECTORS = [
@@ -71,6 +74,21 @@ export class ClaudeAdapter {
       if (hit) return hit;
     }
     return turn;
+  }
+
+  /**
+   * 質問の発言を出現順に全部返す（任意の質問を指定して読ませる用）。
+   * 吹き出しと Claude のボタン列を束ねている枠を返す。見つからなければ本文そのもの。
+   */
+  userTurns(): HTMLElement[] {
+    return Array.from(document.querySelectorAll<HTMLElement>(USER_SEL)).map(
+      (body) => body.closest<HTMLElement>(USER_TURN_SEL) ?? body,
+    );
+  }
+
+  /** 質問の発言から本文要素を取り出す（添付やボタン列は含めない） */
+  contentOfUserTurn(turn: HTMLElement): Element {
+    return turn.matches(USER_SEL) ? turn : (turn.querySelector(USER_SEL) ?? turn);
   }
 
   getLatestAssistantMessage(): AssistantMessage | null {
