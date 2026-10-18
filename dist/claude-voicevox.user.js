@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude → VOICEVOX Bridge
 // @namespace    local.claude-voicevox-bridge
-// @version      0.2.0
+// @version      0.3.0
 // @author       mizumori-24522
 // @description  Claude Web（claude.ai のチャット）の回答を VOICEVOX で逐次読み上げする
 // @homepageURL  https://github.com/mizumori-24522/claude-voicevox-bridge
@@ -317,6 +317,8 @@
       this.playRunning = false;
       this.currentAudio = null;
       this.currentUrl = null;
+      this.finishCurrent = null;
+      this.paused = false;
       this.abortController = null;
       this.waiters = [];
       this.generation = 0;
@@ -332,9 +334,43 @@
       void this.synthLoop();
       void this.playLoop();
     }
+    /**
+     * 一時停止。今の文はその場で止め、続きは resume まで流さない。
+     * 止めている間に増えた文（生成中の回答の続きなど）も貯めておき、再開したら続けて読む。
+     * 何も読んでいないときは何もしない。止めたまま忘れて、次の回答が黙ってしまうのを防ぐため。
+     */
+    pause() {
+      var _a;
+      if (this.paused || this.isIdle()) return;
+      this.paused = true;
+      (_a = this.currentAudio) == null ? void 0 : _a.pause();
+      log("Playback", "pause");
+      this.emit();
+    }
+    /** 一時停止を解いて、止めた位置から続きを読む */
+    resume() {
+      if (!this.paused) return;
+      this.paused = false;
+      log("Playback", "resume");
+      const audio = this.currentAudio;
+      if (audio) {
+        audio.play().catch((e) => {
+          var _a;
+          if (this.paused || this.currentAudio !== audio) return;
+          warn("Playback", "resume rejected", e);
+          this.deps.onError("再生がブロックされました。ページを一度クリックしてください");
+          (_a = this.finishCurrent) == null ? void 0 : _a.call(this);
+        });
+      }
+      this.notify();
+      this.emit();
+      void this.playLoop();
+    }
+    /** 止める・読み直す・新しい質問では、一時停止も解く（新しく読むものが黙らないように） */
     stopAll() {
       var _a;
       this.generation++;
+      this.paused = false;
       this.textQueue = [];
       this.audioQueue = [];
       (_a = this.abortController) == null ? void 0 : _a.abort();
@@ -349,8 +385,13 @@
     get snapshot() {
       return {
         queued: this.textQueue.length + this.audioQueue.length,
-        speaking: this.currentAudio !== null
+        speaking: this.currentAudio !== null,
+        paused: this.paused,
+        idle: this.isIdle()
       };
+    }
+    isIdle() {
+      return this.currentAudio === null && !this.synthRunning && !this.playRunning && this.textQueue.length === 0 && this.audioQueue.length === 0;
     }
     emit() {
       this.deps.onStateChange(this.snapshot);
@@ -380,6 +421,7 @@
         this.currentAudio.src = "";
         this.currentAudio = null;
       }
+      this.finishCurrent = null;
       if (this.currentUrl) {
         URL.revokeObjectURL(this.currentUrl);
         this.currentUrl = null;
@@ -441,6 +483,10 @@
       const gen = this.generation;
       try {
         while (gen === this.generation) {
+          if (this.paused) {
+            await this.wait();
+            continue;
+          }
           if (this.audioQueue.length === 0) {
             if (!this.synthRunning && this.textQueue.length === 0) break;
             await this.wait();
@@ -465,13 +511,17 @@
         this.currentAudio = audio;
         this.currentUrl = url;
         this.emit();
+        let finished = false;
         const finish = () => {
+          if (finished) return;
+          finished = true;
           if (this.currentAudio === audio) this.teardownAudio();
           else URL.revokeObjectURL(url);
           this.notify();
           this.emit();
           resolve();
         };
+        this.finishCurrent = finish;
         audio.onended = finish;
         audio.onerror = () => {
           warn("Playback", "audio playback failed");
@@ -479,6 +529,7 @@
           finish();
         };
         audio.play().catch((e) => {
+          if (this.paused && this.currentAudio === audio) return;
           warn("Playback", "play() rejected", e);
           this.deps.onError("再生がブロックされました。ページを一度クリックしてください");
           finish();
@@ -1453,6 +1504,9 @@ input[type=range] { flex: 1; min-width: 0; }
 .btn:hover { filter: brightness(.96); }
 .btn.on { background: #22c55e; border-color: #22c55e; color: #fff; }
 .btn.stop { background: #ef4444; border-color: #ef4444; color: #fff; }
+.btn.paused { background: #f59e0b; border-color: #f59e0b; color: #fff; }
+.btn.fit { flex: none; }
+.btn:disabled { opacity: .45; cursor: default; filter: none; }
 .status { font-size: 11px; opacity: .8; min-height: 15px; }
 .status.err { color: #ef4444; opacity: 1; }
 .val { flex: none; width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -1466,6 +1520,7 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
   .btn { background: #2b2c2f; border-color: #4a4a4a; color: #ececec; }
   .btn.on { background: #22c55e; border-color: #22c55e; color: #fff; }
   .btn.stop { background: #ef4444; border-color: #ef4444; color: #fff; }
+  .btn.paused { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 }
 `;
   class UiPanel {
@@ -1512,7 +1567,8 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
           <span class="val" id="gapVal"></span>
         </div>
         <div class="row">
-          <button class="btn" id="toggle">🔊 ON</button>
+          <button class="btn fit" id="toggle">🔊 ON</button>
+          <button class="btn" id="pause" disabled title="今の文で止め、続きは「再開」で読みます">⏸ 一時停止</button>
           <button class="btn stop" id="stop">■ STOP</button>
         </div>
         <div class="row">
@@ -1570,6 +1626,7 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
         gap: q("gap"),
         gapVal: q("gapVal"),
         toggle: q("toggle"),
+        pause: q("pause"),
         stop: q("stop"),
         status: q("status"),
         codeMode: q("codeMode"),
@@ -1591,6 +1648,7 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
       });
       this.el.toggle.addEventListener("click", () => this.cb.onToggleEnabled(!this.settings.enabled));
       this.el.stop.addEventListener("click", () => this.cb.onStop());
+      this.el.pause.addEventListener("click", () => this.cb.onTogglePause());
       this.el.test.addEventListener("click", () => this.cb.onTestSpeak());
       this.el.speakSel.addEventListener("mousedown", (e) => e.preventDefault());
       this.el.speakSel.addEventListener("click", () => this.cb.onSpeakSelection());
@@ -1681,6 +1739,13 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
     setSpeakers(options, selectedId) {
       this.picker.setOptions(options, selectedId);
       this.questionPicker.setOptions(options, this.settings.questionStyleId);
+    }
+    /** 再生の状態に合わせて一時停止ボタンを切り替える。読むものが無いときは押せない */
+    setPlayback(s) {
+      const btn = this.el.pause;
+      btn.textContent = s.paused ? "▶ 再開" : "⏸ 一時停止";
+      btn.classList.toggle("paused", s.paused);
+      btn.disabled = s.idle && !s.paused;
     }
     setConnection(state, text) {
       this.el.dot.className = `dot ${state}`;
@@ -1829,7 +1894,9 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
         if (msg.includes("接続")) void connect();
       },
       onStateChange: (s) => {
-        if (!s.speaking && s.queued === 0) ui.setStatus("");
+        ui.setPlayback(s);
+        if (s.paused) ui.setStatus(`一時停止中（待ち ${s.queued}）`);
+        else if (!s.speaking && s.queued === 0) ui.setStatus("");
         else ui.setStatus(`${s.speaking ? "読み上げ中" : "合成中"}（待ち ${s.queued}）`);
       }
     });
@@ -1842,6 +1909,7 @@ details summary { cursor: pointer; opacity: .8; font-size: 11px; }
         }
       },
       onStop: () => stopSpeaking(),
+      onTogglePause: () => queue.snapshot.paused ? queue.resume() : queue.pause(),
       onReconnect: () => void connect(),
       onTestSpeak: () => queue.enqueue("ボイスボックス接続テストです。"),
       onSpeakSelection: () => speakSelection(),
